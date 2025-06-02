@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <title>Mapa Interativo - Ambev</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/choices.js/public/assets/styles/choices.min.css" />
+
+  <style>
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+    }
+
+    #map {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      right: 0;
+      left: 0;
+      z-index: 0;
+    }
+
+.filtros {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    z-index: 1000;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    max-width: calc(100vw - 40px); /* evita estouro horizontal */
+    padding: 10px;
+}
+
+.filtros select {
+    font-size: 13px;
+    width: 200px;
+    height: 40px;
+    border-radius: 10px;
+    border: 1px solid #ccc;
+    padding: 6px 10px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+    background-color: #f7f7f7;
+    box-sizing: border-box;
+    flex-shrink: 0; /* evita compressão */
+}
+
+.choices__inner {
+    border-radius: 10px !important;
+    background-color: #f7f7f7 !important;
+    font-size: 13px;
+    min-height: 38px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.1) !important;
+    box-sizing: border-box;
+}
+
+.choices[data-type*=select-multiple] .choices__button {
+    font-size: 10px;
+}
+
+    #botaoHeatmap {
+     position: absolute;
+    bottom: 10px;
+    left: 10px;
+    background-color: white; /* Reaplica o fundo branco */
+    padding: 6px 12px;
+    border-radius: 10px;
+    font-size: 12px;
+    font-family: Arial, sans-serif;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.2);
+    z-index: 1001;
+    }
+
+    #legenda {
+      position: absolute;
+      bottom: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 1000;
+      background: white;
+      padding: 6px 10px;
+      border-radius: 8px;
+      font-size: 12px;
+      text-align: center;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="filtros">
+    <select id="filtroCDD" multiple></select>
+    <select id="filtroGN" multiple></select>
+    <select id="filtroInplant" multiple></select>
+    <select id="filtroRede" multiple></select>
+    <select id="filtroDia" multiple></select>
+  </div>
+
+  <button id="botaoHeatmap">Ativar Heatmap</button>
+  <div id="map"></div>
+
+  <div id="legenda">
+    <b>Legenda:</b>
+    <span style="color:red;">● Agenda</span> |
+    <span style="color:blue;">● Segunda</span> |
+    <span style="color:green;">● Terça</span> |
+    <span style="color:purple;">● Quarta</span> |
+    <span style="color:brown;">● Quinta</span> |
+    <span style="color:black;">● Sexta</span> |
+    <span style="color:orange;">● Sábado</span> |
+    <span style="color:darkorange;">🔥 Heatmap</span>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet.heat/dist/leaflet-heat.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.3.2/papaparse.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/choices.js/public/assets/scripts/choices.min.js"></script>
+
+  <script>
+    const url = 'https://raw.githubusercontent.com/marianarizzo/siteambev/main/Planner%20CSV.csv';
+    const map = L.map('map').setView([-15.7797, -47.9297], 5);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+    const grupoMarcadores = L.layerGroup().addTo(map);
+    let heatLayer;
+
+    const filtros = {
+      CDD: new Choices('#filtroCDD', { removeItemButton: true }),
+      GN: new Choices('#filtroGN', { removeItemButton: true }),
+      Inplant: new Choices('#filtroInplant', { removeItemButton: true }),
+      Rede: new Choices('#filtroRede', { removeItemButton: true }),
+      Dia: new Choices('#filtroDia', { removeItemButton: true })
+    };
+
+    const coresPorDia = {
+      'Agenda': 'red',
+      'Segunda': 'blue',
+      'Terça': 'green',
+      'Quarta': 'purple',
+      'Quinta': 'brown',
+      'Sexta': 'black',
+      'Sábado': 'orange'
+    };
+
+    function preencherFiltros(dados, chave, controle) {
+      const valores = [...new Set(dados.map(d => d[chave]).filter(Boolean))].sort();
+      controle.clearChoices();
+      controle.setChoices(valores.map(v => ({ value: v, label: v })), 'value', 'label', true);
+    }
+
+    function atualizarMapa(dados) {
+      grupoMarcadores.clearLayers();
+      if (heatLayer) map.removeLayer(heatLayer);
+      let heatData = [];
+
+      const cdd = filtros.CDD.getValue(true);
+      const gn = filtros.GN.getValue(true);
+      const inplant = filtros.Inplant.getValue(true);
+      const rede = filtros.Rede.getValue(true);
+      const diasSelecionados = filtros.Dia.getValue(true);
+
+      dados.forEach(d => {
+        const lat = parseFloat(d['LAT']);
+        const lon = parseFloat(d['LONG']);
+        if (isNaN(lat) || isNaN(lon)) return;
+
+        const cddValido = cdd.length === 0 || cdd.includes(d['CDD']);
+        const gnValido = gn.length === 0 || gn.includes(d['GN']);
+        const inplantValido = inplant.length === 0 || inplant.includes(d['Inplant']);
+        const redeValido = rede.length === 0 || rede.includes(d['Rede']);
+
+        let diaValido = false;
+        let cor = 'gray';
+
+        for (let dia of (diasSelecionados.length ? diasSelecionados : Object.keys(coresPorDia))) {
+          if (d[dia]?.trim() === '1') {
+            diaValido = true;
+            cor = coresPorDia[dia] || 'gray';
+            break;
+          }
+        }
+
+        if (cddValido && gnValido && inplantValido && redeValido && diaValido) {
+          heatData.push([lat, lon, 1]);
+          const marker = L.circleMarker([lat, lon], {
+            radius: 6,
+            color: cor,
+            fillColor: cor,
+            fillOpacity: 0.8,
+            weight: 1
+          }).bindPopup(
+            `<b>${d['Nome']}</b><br>
+            CDD: ${d['CDD']}<br>
+            GN: ${d['GN']}<br>
+            Inplant: ${d['Inplant']}<br>
+            Rede: ${d['Rede']}`
+          );
+
+          grupoMarcadores.addLayer(marker);
+        }
+      });
+
+      heatLayer = L.heatLayer(heatData, { radius: 25, blur: 15, maxZoom: 10 });
+    }
+
+    Papa.parse(url, {
+      download: true,
+      header: true,
+      complete: results => {
+        const dados = results.data;
+
+        preencherFiltros(dados, 'CDD', filtros.CDD);
+        preencherFiltros(dados, 'GN', filtros.GN);
+        preencherFiltros(dados, 'Inplant', filtros.Inplant);
+        preencherFiltros(dados, 'Rede', filtros.Rede);
+
+        filtros.Dia.clearChoices();
+        filtros.Dia.setChoices([
+          { value: 'Agenda', label: 'Agenda' },
+          { value: 'Segunda', label: 'Segunda' },
+          { value: 'Terça', label: 'Terça' },
+          { value: 'Quarta', label: 'Quarta' },
+          { value: 'Quinta', label: 'Quinta' },
+          { value: 'Sexta', label: 'Sexta' },
+          { value: 'Sábado', label: 'Sábado' }
+        ], 'value', 'label', true);
+
+        atualizarMapa(dados);
+
+        Object.values(filtros).forEach(f => {
+          f.passedElement.element.addEventListener('change', () => atualizarMapa(dados));
+        });
+
+        document.getElementById('botaoHeatmap').addEventListener('click', () => {
+          if (map.hasLayer(heatLayer)) {
+            map.removeLayer(heatLayer);
+          } else {
+            heatLayer.addTo(map);
+          }
+        });
+      }
+    });
+  </script>
+</body>
+</html>
